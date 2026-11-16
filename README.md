@@ -2,4 +2,4 @@
 Google Speech Recognition for ROS2
 
 Dependencies:
-pyttsx3 SpeechRecognition pyaudio
+pyttsx3 SpeechRecognition sounddevice
