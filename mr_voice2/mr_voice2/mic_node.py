@@ -11,43 +11,55 @@ class MicNode(Node):
     def __init__(self):
         super().__init__('mic_node')
         self.declare_parameter('audio_directory', '/tmp/speech')
-        self.declare_parameter('threshold', 5000)  # Sensitivity (lower = more sensitive)
-        self.declare_parameter('silence_limit', 1.5) # Seconds of silence before saving
+        self.declare_parameter('threshold', 500)
+        self.declare_parameter('silence_limit', 1.5)
+        self.declare_parameter('device', -1)  # -1 uses system default, or specify device index
         
         self.audio_dir = self.get_parameter('audio_directory').value
         self.threshold = self.get_parameter('threshold').value
         self.silence_limit = self.get_parameter('silence_limit').value
+        self.device_id = self.get_parameter('device').value
         
         if not os.path.exists(self.audio_dir):
             os.makedirs(self.audio_dir)
 
         self.pub = self.create_publisher(String, '~/audio_path', 10)
         
-        # Internal State
         self.audio_buffer = []
         self.recording = False
         self.silence_start = None
 
-        self.stream = sd.InputStream(
-            samplerate=16000,
-            channels=1,
-            dtype='int16',
-            blocksize=1024,
-            callback=self.stream_callback
-        )
-        self.stream.start()
-        self.get_logger().info(f"Mic Node OK. Sensitivity: {self.threshold}")
+        # Print available audio devices to log so you can identify the correct device index
+        devices = sd.query_devices()
+        self.get_logger().info(f"Available audio devices:\n{devices}")
+
+        device_arg = None if self.device_id == -1 else self.device_id
+
+        try:
+            self.stream = sd.InputStream(
+                device=device_arg,
+                samplerate=16000,
+                channels=1,
+                dtype='int16',
+                blocksize=1024,
+                callback=self.stream_callback
+            )
+            self.stream.start()
+            self.get_logger().info(f"Mic Node OK. Device: {device_arg if device_arg is not None else 'Default'}. Sensitivity: {self.threshold}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to open audio stream: {e}")
+            raise e
 
     def stream_callback(self, indata, frames, time_info, status):
         if status:
-            self.get_logger().warn(str(status))
+            self.get_logger().warn(f"Audio status warning: {status}")
 
         data = indata.flatten()
         rms = np.sqrt(np.mean(data.astype(float)**2))
 
         if rms > self.threshold:
             if not self.recording:
-                self.get_logger().info("Recording started...")
+                self.get_logger().info(f"Recording started... (RMS: {rms:.1f})")
                 self.recording = True
             
             self.audio_buffer.append(data.copy())
@@ -66,6 +78,9 @@ class MicNode(Node):
         self.recording = False
         self.silence_start = None
         
+        if not self.audio_buffer:
+            return
+
         filename = f"mic-{int(time.time())}.wav"
         filepath = os.path.join(self.audio_dir, filename)
 
@@ -73,7 +88,7 @@ class MicNode(Node):
 
         with wave.open(filepath, 'wb') as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(2)  # int16 = 2 bytes
+            wf.setsampwidth(2)
             wf.setframerate(16000)
             wf.writeframes(audio_data.tobytes())
 
@@ -93,8 +108,9 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.stream.stop()
-        node.stream.close()
+        if hasattr(node, 'stream') and node.stream.active:
+            node.stream.stop()
+            node.stream.close()
         node.destroy_node()
         rclpy.shutdown()
 
