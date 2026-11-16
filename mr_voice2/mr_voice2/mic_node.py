@@ -1,11 +1,11 @@
+import os
+import time
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-import pyaudio
-import numpy as np
+import sounddevice as sd
 import wave
-import os
-import time
 
 class MicNode(Node):
     def __init__(self):
@@ -28,68 +28,61 @@ class MicNode(Node):
         self.recording = False
         self.silence_start = None
 
-        self.p = pyaudio.PyAudio()
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
+        self.stream = sd.InputStream(
+            samplerate=16000,
             channels=1,
-            rate=16000 ,
-            input=True,
-            frames_per_buffer=1024,
-            stream_callback=self.stream_callback
+            dtype='int16',
+            blocksize=1024,
+            callback=self.stream_callback
         )
+        self.stream.start()
         self.get_logger().info(f"Mic Node OK. Sensitivity: {self.threshold}")
 
-    def stream_callback(self, in_data, frame_count, time_info, status):
-        # Convert buffer to numpy array to calculate volume
-        data = np.frombuffer(in_data, dtype=np.int16)
+    def stream_callback(self, indata, frames, time_info, status):
+        if status:
+            self.get_logger().warn(str(status))
+
+        data = indata.flatten()
         rms = np.sqrt(np.mean(data.astype(float)**2))
 
         if rms > self.threshold:
-            # Sound detected
             if not self.recording:
                 self.get_logger().info("Recording started...")
                 self.recording = True
             
-            self.audio_buffer.append(in_data)
-            self.silence_start = None # Reset silence timer
+            self.audio_buffer.append(data.copy())
+            self.silence_start = None
         else:
-            # Silence detected
             if self.recording:
                 if self.silence_start is None:
                     self.silence_start = time.time()
                 
-                # Check if silence has lasted long enough to stop
                 if (time.time() - self.silence_start) > self.silence_limit:
                     self.save_audio()
                 else:
-                    # Still within silence limit, keep buffering silence
-                    self.audio_buffer.append(in_data)
-
-        return (in_data, pyaudio.paContinue)
+                    self.audio_buffer.append(data.copy())
 
     def save_audio(self):
         self.recording = False
         self.silence_start = None
         
-        # Generate unique filename
         filename = f"mic-{int(time.time())}.wav"
         filepath = os.path.join(self.audio_dir, filename)
 
-        # Write to WAV file
+        audio_data = np.concatenate(self.audio_buffer)
+
         with wave.open(filepath, 'wb') as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(self.p.get_sample_size(pyaudio.paInt16))
+            wf.setsampwidth(2)  # int16 = 2 bytes
             wf.setframerate(16000)
-            wf.writeframes(b''.join(self.audio_buffer))
+            wf.writeframes(audio_data.tobytes())
 
         self.get_logger().info(f"Saved: {filepath}")
         
-        # Publish path for STT node
         msg = String()
         msg.data = filepath
         self.pub.publish(msg)
 
-        # Clear buffer
         self.audio_buffer = []
 
 def main(args=None):
@@ -100,8 +93,10 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.stream.stop_stream()
+        node.stream.stop()
         node.stream.close()
-        node.p.terminate()
         node.destroy_node()
         rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
