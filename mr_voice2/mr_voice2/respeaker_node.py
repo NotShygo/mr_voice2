@@ -1,17 +1,15 @@
+import os
+import struct
+import time
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+import sounddevice as sd
 import usb.core
 import usb.util
-import struct
-import time
-import pyaudio
-import numpy as np
 import wave
-import os
 from pixel_ring import usb_pixel_ring_v2
-
-# ... (Keep the PARAMETERS dictionary from your original script) ...
 
 class RespeakerNode(Node):
     def __init__(self):
@@ -38,48 +36,73 @@ class RespeakerNode(Node):
         self.pixel_ring.think()
         
         # Audio setup
-        self.p = pyaudio.PyAudio()
         self.audio_buf = []
         self.is_voice_buf = []
         self.direction_buf = []
         
-        self.stream = self.p.open(
-            input=True,
-            format=pyaudio.paInt16,
+        self.stream = sd.InputStream(
+            samplerate=16000,
             channels=6,
-            rate=16000,
-            frames_per_buffer=1024,
-            stream_callback=self.stream_callback
+            dtype='int16',
+            blocksize=1024,
+            callback=self.stream_callback
         )
+        self.stream.start()
         self.get_logger().info("Respeaker Node Started")
 
-    def stream_callback(self, in_data, frame_count, time_info, status):
-        data = np.frombuffer(in_data, dtype=np.int16)
+    def stream_callback(self, indata, frames, time_info, status):
+        if status:
+            self.get_logger().warn(str(status))
+
+        # indata shape is (frames, channels), dtype is int16
         # Channel 0 is processed audio
-        if len(self.is_voice_buf) >= self.max_buf: self.is_voice_buf.pop(0)
+        if len(self.is_voice_buf) >= self.max_buf:
+            self.is_voice_buf.pop(0)
         
-        # In ROS 2, checking parameters of other nodes (like 'is_saying') 
-        # is done via a ParameterClient, but here we keep it simple.
         is_v = self.read_vad() 
         self.is_voice_buf.append(is_v)
 
         if sum(self.is_voice_buf) == 0 and len(self.audio_buf) > 0:
             self.save_and_publish()
         elif is_v:
-            self.audio_buf.append(in_data)
-            
-        return None, pyaudio.paContinue
+            self.audio_buf.append(indata.copy())
 
     def read_vad(self):
         # Implementation of your USB control transfer to read 'VOICEACTIVITY'
-        return 1 # Simplified for space
+        return 1  # Simplified
 
     def save_and_publish(self):
-        # logic to write wave file and pub.publish(path)
-        pass
+        filename = f"respeaker-{int(time.time())}.wav"
+        filepath = os.path.join(self.audio_dir, filename)
+
+        audio_data = np.concatenate(self.audio_buf, axis=0)
+
+        with wave.open(filepath, 'wb') as wf:
+            wf.setnchannels(6)
+            wf.setsampwidth(2)  # int16 = 2 bytes
+            wf.setframerate(16000)
+            wf.writeframes(audio_data.tobytes())
+
+        self.get_logger().info(f"Saved: {filepath}")
+        
+        msg = String()
+        msg.data = filepath
+        self.pub.publish(msg)
+
+        self.audio_buf = []
 
 def main(args=None):
     rclpy.init(args=args)
     node = RespeakerNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.stream.stop()
+        node.stream.close()
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
